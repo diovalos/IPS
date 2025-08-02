@@ -1,0 +1,6 @@
+🖼️ Suggestion for PPT 
+
+Add a slide titled:
+"ESP32: Wi-Fi Scanning & Distance Estimation Code"
+→ Show a snippet of the estimateDistance() function
+→ Explain: "Distance is calculated using RSSI and calibrated path loss model" 
