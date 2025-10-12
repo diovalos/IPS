@@ -1,277 +1,117 @@
-#include <WiFi.h>
+#include "WiFi.h"
+#include <cmath>
 
-#include <stdbool.h>
+// --- Configuration ---
+const char* AP_SSIDS[] = {"narzo", "Y_GIRIBABU3 4620", "A"}; // updated order
+const int NUM_APS = 3;
 
-// --- CONFIGURATION ---
+const double TX_POWER = -45.0; // Calibrate this at exactly 1 meter!
+const double PATH_LOSS_EXPONENT = 2.5;
 
-// Define the MAC addresses or SSIDs of the 3 known Access Points (Hotspots)
+// --- Noise Filter (Moving Average) Configuration ---
+const int FILTER_SAMPLES = 10;
+int rssi_readings[NUM_APS][FILTER_SAMPLES];
+int reading_index[NUM_APS] = {0};
+long rssi_totals[NUM_APS] = {0};
+int sample_counts[NUM_APS] = {0};
+double filtered_rssi[NUM_APS] = {0.0};
 
-// You can use either MAC or SSID. Using MAC is more reliable if SSID is not unique.
-
-
-
-// Option 1: Use MAC addresses (recommended)
-
-//uint8_t AP1_MAC[] = {0xA6, 0x8B, 0x48, 0xBC, 0x06, 0xBA}; // Replace with actual MAC of Hotspot 1
-
-//uint8_t AP2_MAC[] = {0x92, 0x0f, 0x69, 0xbf, 0x58, 0xf7}; // Hotspot 2
-
-//uint8_t AP3_MAC[] = {0x3A, 0x4B, 0x5C, 0x6D, 0x7E, 0x8F}; // Hotspot 3
-
-
-
-// Option 2: Use SSIDs (less reliable if multiple networks have same name)
-
-const char* AP1_SSID = "hello";
-
-const char* AP2_SSID = "narzo";
-
-const char* AP3_SSID = "A";
-
-
-
-// Calibration values (MUST be measured experimentally!)
-
-#define REFERENCE_RSSI -40    // RSSI at 1 meter (dBm). Measure this!
-
-#define PATH_LOSS_EXPONENT 3.0  // Typical indoor value: 2.5–4.0
-
-
-
-// Scan settings
-
-#define SCAN_DELAY 50  // Delay between scans (ms)
-
-
+void update_filter(int ap_index, int new_rssi);
+double calculate_distance(double rssi);
+void print_status();
+void send_data_to_serial();
 
 void setup() {
+    Serial.begin(115200);
+    Serial.println("ESP32 WiFi Distance Calculator - Updated");
 
-  Serial.begin(115200);
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    delay(100);
 
-  WiFi.mode(WIFI_STA);
-
-  WiFi.disconnect();
-
-  delay(50);
-
-
-
-  Serial.println("ESP32 Wi-Fi RSSI Distance Estimator");
-
-  Serial.println("Scanning for 3 Access Points...");
-
+    for (int i = 0; i < NUM_APS; i++) {
+        for (int j = 0; j < FILTER_SAMPLES; j++) rssi_readings[i][j] = 0;
+        reading_index[i] = 0;
+        rssi_totals[i] = 0;
+        sample_counts[i] = 0;
+        filtered_rssi[i] = 0.0;
+    }
+    Serial.println("Setup complete. Starting scan loop...");
 }
-
-
 
 void loop() {
+    Serial.println("\nStarting WiFi scan...");
+    int n = WiFi.scanNetworks();
+    Serial.print(n); Serial.println(" networks found.");
 
-  int16_t rssi1 = 100, rssi2 = 100, rssi3 = 100; // Initialize with invalid high value
+    bool ap_found[NUM_APS] = {false};
 
-  bool found1 = false, found2 = false, found3 = false;
-
-
-
-  // Start Wi-Fi scan
-
-  int n = WiFi.scanNetworks();
-
-  Serial.printf("Scanned %d networks\n", n);
-
-
-
-//  for (int i = 0; i < n; i++) {
-
-//    // Get MAC address of scanned network
-
-//    uint8_t* mac = WiFi.BSSID(i);
-
-//
-
-//    // Compare MAC addresses (use this for accuracy)
-
-//    if (!found1 && compareMAC(mac, AP1_MAC)) {
-
-//      rssi1 = WiFi.RSSI(i);
-
-//      found1 = true;
-
-//    }
-
-//    if (!found2 && compareMAC(mac, AP2_MAC)) {
-
-//      rssi2 = WiFi.RSSI(i);
-
-//      found2 = true;
-
-//    }
-
-//    if (!found3 && compareMAC(mac, AP3_MAC)) {
-
-//      rssi3 = WiFi.RSSI(i);
-
-//      found3 = true;
-
-//    }
-
-
-
-
-
- // In loop():
-
-
-
-//for (int i = 0; i < n; i++) {
-
-//  String ssid = WiFi.SSID(i);
-
-//  if (!found1 && ssid == String(AP1_SSID)) {
-
-//    rssi1 = WiFi.RSSI(i);
-
-//    found1 = true;
-
-//  }
-
-//  if (!found2 && ssid == String(AP2_SSID)) {
-
-//    rssi2 = WiFi.RSSI(i);
-
-//    found2 = true;
-
-//  }
-
-//  if (!found3 && ssid == String(AP3_SSID)) {
-
-//    rssi3 = WiFi.RSSI(i);
-
-//    found3 = true;
-
-//  }
-
-//}
-
-
-
-
-
-  for (int i = 0; i < n; i++) {
-
-    // Get MAC address of scanned network
-
-//    uint8_t* mac = WiFi.BSSID(i);
-
-
-
-    // Compare MAC addresses (use this for accuracy)
-
-    if (!found1 && strcmp(WiFi.SSID(i).c_str(), AP1_SSID) == 0) {
-
-      rssi1 = WiFi.RSSI(i);
-
-      found1 = true;
-
+    if (n > 0) {
+        for (int i = 0; i < n; ++i) {
+            String ssid = WiFi.SSID(i);
+            int rssi = WiFi.RSSI(i);
+            for (int j = 0; j < NUM_APS; j++) {
+                if (ssid.equals(AP_SSIDS[j])) {
+                    update_filter(j, rssi);
+                    ap_found[j] = true;
+                    break;
+                }
+            }
+        }
+    } else {
+        Serial.println("No networks found.");
     }
 
-     if (!found2 && strcmp(WiFi.SSID(i).c_str(), AP2_SSID) == 0) {
-
-      rssi2 = WiFi.RSSI(i);
-
-      found2 = true;
-
-    } if (!found3 && strcmp(WiFi.SSID(i).c_str(), AP3_SSID) == 0) {
-
-      rssi3 = WiFi.RSSI(i);
-
-      found3 = true;
-
+    for (int i = 0; i < NUM_APS; i++) {
+        if (!ap_found[i]) {
+            Serial.print("AP '"); Serial.print(AP_SSIDS[i]); Serial.println("' not found. Retaining previous average.");
+        }
     }
 
-  }
-
-    Serial.printf("%d %d %d device found \n",(int)found1,(int)found2,(int)found3);
-
-    // Optional: Use SSID matching instead
-
-    /*
-
-    if (!found1 && strcmp(WiFi.SSID(i).c_str(), AP1_SSID) == 0) {
-
-      rssi1 = WiFi.RSSI(i);
-
-      found1 = true;
-
-    }
-
-    */
-
-//}
-
-
-
-  // Estimate distance for each AP
-
-  float d1 = estimateDistance(rssi1);
-
-  float d2 = estimateDistance(rssi2);
-
-  float d3 = estimateDistance(rssi3);
-
-
-
-  // Print results
-
-  Serial.println("\n--- RSSI & Distance ---");
-
-  Serial.printf("AP1 - RSSI: %d dBm | Distance: %.2f m\n", rssi1, d1);
-
-  Serial.printf("AP2 - RSSI: %d dBm | Distance: %.2f m\n", rssi2, d2);
-
-  Serial.printf("AP3 - RSSI: %d dBm | Distance: %.2f m\n", rssi3, d3);
-
-
-
-  // You can now send this data via UDP/TCP/HTTP to your computer!
-
-  // Example: Serial.println("DATA:" + String(d1) + "," + String(d2) + "," + String(d3));
-
-
-
-  // Wait before next scan
-
-  WiFi.scanDelete(); // Free memory
-
-  delay(SCAN_DELAY);
-
+    print_status();
+    send_data_to_serial();
+    delay(2000);
 }
 
+void update_filter(int ap_index, int new_rssi) {
+    if (sample_counts[ap_index] < FILTER_SAMPLES) sample_counts[ap_index]++;
+    else rssi_totals[ap_index] -= rssi_readings[ap_index][reading_index[ap_index]];
 
+    rssi_readings[ap_index][reading_index[ap_index]] = new_rssi;
+    rssi_totals[ap_index] += new_rssi;
 
-// Function to estimate distance from RSSI
+    reading_index[ap_index]++;
+    if (reading_index[ap_index] >= FILTER_SAMPLES) reading_index[ap_index] = 0;
 
-float estimateDistance(int rssi) {
-
-  if (rssi == 100 || rssi >= 0) return 0.0; // Invalid or no signal
-
-  float ratio = (REFERENCE_RSSI - rssi) / (10 * PATH_LOSS_EXPONENT);
-
-  return pow(10, ratio);
-
+    filtered_rssi[ap_index] = (sample_counts[ap_index] > 0) ? ((double)rssi_totals[ap_index]/sample_counts[ap_index]) : 0.0;
 }
 
+double calculate_distance(double rssi) {
+    if (rssi == 0.0) return -1.0;
+    double exponent = (TX_POWER - rssi)/(10.0 * PATH_LOSS_EXPONENT);
+    return pow(10.0, exponent);
+}
 
+void print_status() {
+    Serial.println("\n--- Current Status ---");
+    for (int i = 0; i < NUM_APS; i++) {
+        double dist = calculate_distance(filtered_rssi[i]);
+        Serial.print("AP: "); Serial.print(AP_SSIDS[i]);
+        Serial.print("\tRSSI: "); Serial.print(filtered_rssi[i],2);
+        Serial.print(" dBm\tDistance: ");
+        if (dist<0) Serial.println("N/A");
+        else Serial.println(dist,3);
+    }
+    Serial.println("----------------------");
+}
 
-// Helper: Compare two MAC addresses
-
-bool compareMAC(uint8_t* a, uint8_t* b) {
-
-  for (int i = 0; i < 6; i++) {
-
-    if (a[i] != b[i]) return false;
-
-  }
-
-  return true;
-
+void send_data_to_serial() {
+    Serial.print("DATA:");
+    for (int i = 0; i < NUM_APS; i++) {
+        double dist = calculate_distance(filtered_rssi[i]);
+        if (dist < 0) Serial.print("0.000");
+        else Serial.print(dist,3);
+        if (i < NUM_APS-1) Serial.print(",");
+    }
+    Serial.println();
 }
