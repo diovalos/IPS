@@ -1,3 +1,4 @@
+//moving average
 #include "WiFi.h"
 #include <cmath>
 
